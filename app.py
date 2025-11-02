@@ -81,7 +81,8 @@ if submitted:
             .select(['B8', 'B4'])
         )
 
-        if collection.size().getInfo() == 0:
+        collection_size = collection.size().getInfo()
+        if collection_size == 0:
             st.warning("Satelliidipilte ei leitud. Proovi laiemat perioodi.")
             folium_static(m, width=900, height=500)
             st.stop()
@@ -93,11 +94,17 @@ if submitted:
 
         ndvi_col = collection.map(calc_ndvi)
 
-        # --- NDVI PILT KAARDIL (turvaline) ---
+        # --- NDVI PILT KAARDIL (TURVALINE) ---
         mean_ndvi_image = ndvi_col.mean().select('NDVI').clip(buffer)
         try:
-            sample = mean_ndvi_image.sample(buffer, 1).first().getInfo()
-            if sample and 'NDVI' in sample['properties']:
+            # Kontrolli, kas pildil on väärtusi
+            stats = mean_ndvi_image.reduceRegion(
+                reducer=ee.Reducer.minMax(),
+                geometry=buffer,
+                scale=10,
+                maxPixels=1e5
+            ).getInfo()
+            if stats.get('NDVI_min') is not None:
                 ndvi_vis = {
                     'min': 0, 'max': 0.8,
                     'palette': ['#8B0000', '#FF4500', '#FFD700', '#ADFF2F', '#228B22']
@@ -110,33 +117,15 @@ if submitted:
                     overlay=True,
                     control=True
                 ).add_to(m)
-                st.success("NDVI kiht lisatud!")
+                st.success("NDVI kiht lisatud kaardile!")
+            else:
+                st.info("NDVI kihti ei saa kuvada – andmed puuduvad.")
         except Exception as e:
             st.warning(f"NDVI kiht ebaõnnestus: {e}")
 
         folium.LayerControl().add_to(m)
 
-    # Lisa sile NDVI kiht (interpolatsioon)
-folium.TileLayer(
-    tiles=map_id['tile_fetcher'].url_format,
-    attr='Google Earth Engine',
-    overlay=True,
-    name='NDVI (sile)',
-    opacity=0.7  # Natuke läbipaistev
-).add_to(m)
-
-# Lisa baaskaart (satelliit)
-folium.TileLayer(
-    tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    attr='Esri',
-    name='Satelliitpilt',
-    overlay=True,
-    opacity=0.6
-).add_to(m)
-
-folium.LayerControl().add_to(m)
-
-        # --- NDVI ANDMED (turvaline) ---
+        # --- NDVI ANDMED (TURVALINE) ---
         def extract_stats(img):
             mean = img.reduceRegion(ee.Reducer.mean(), buffer, 10).get('NDVI')
             date = img.date().format('YYYY-MM-dd')
@@ -163,7 +152,7 @@ folium.LayerControl().add_to(m)
         avg_ndvi = np.mean(ndvi_vals)
         max_tolm = max(tolm)
 
-        # --- VARJUDE ANALÜÜS (TURVALINE) ---
+        # --- VARJUDE ANALÜÜS (100% TURVALINE) ---
         @st.cache_data
         def calculate_sunlight(lat, lon, date):
             try:
@@ -178,9 +167,9 @@ folium.LayerControl().add_to(m)
                 sunrise_time = None
                 sunset_time = None
                 for t, event in zip(times, events):
-                    if event == 1:
+                    if event == 1:  # Tõus
                         sunrise_time = t
-                    elif event == 0:
+                    elif event == 0:  # Langemine
                         sunset_time = t
 
                 if sunrise_time and sunset_time:
@@ -189,7 +178,7 @@ folium.LayerControl().add_to(m)
                     return round(hours, 1), round(effective, 1)
                 else:
                     return 0, 0
-            except:
+            except Exception:
                 return 0, 0
 
         total_sun, effective_sun = calculate_sunlight(lat, lon, datetime.date.today())
@@ -198,7 +187,7 @@ folium.LayerControl().add_to(m)
         df = {"Kuupäev": dates, "NDVI": ndvi_vals, "Tolm %": tolm}
         fig = px.line(
             df, x="Kuupäev", y=["NDVI", "Tolm %"],
-            title="NDVI ja Tolmu trend",
+            title="NDVI ja Tolmu trend ajas",
             color_discrete_sequence=['#228B22', '#FF4500']
         )
         fig.update_layout(legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01))
@@ -216,7 +205,7 @@ folium.LayerControl().add_to(m)
                 st.metric("Efektiivne päike", "0h", delta="Polaarööl/päev")
 
         st.plotly_chart(fig, use_container_width=True)
-        st.markdown("### 🗺️ Satelliitpilt + NDVI")
+        st.markdown("### 🗺️ Satelliitpilt + NDVI (200m ala)")
         folium_static(m, width=900, height=500)
 
         # --- TEAVITUS ---
@@ -228,14 +217,18 @@ folium.LayerControl().add_to(m)
                     msg = MIMEMultipart()
                     msg["From"] = sender
                     msg["To"] = email_recipient
-                    msg["Subject"] = f"Päikesepaneelid tolmused: {address}"
+                    msg["Subject"] = f"⚠️ Päikesepaneelid tolmused: {address}"
                     body = f"""
                     AUTOMAATNE TEAVITUS
+
                     Aadress: {address}
-                    Tolm: {max_tolm:.1f}%
-                    NDVI: {avg_ndvi:.3f}
-                    Päike: {effective_sun}h
+                    Maksimaalne tolm: {max_tolm:.1f}%
+                    NDVI keskmine: {avg_ndvi:.3f}
+                    Efektiivne päike: {effective_sun}h
+
                     Soovitus: Puhasta paneelid!
+
+                    Analüüs: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M')}
                     """
                     msg.attach(MIMEText(body, "plain"))
                     server = smtplib.SMTP("smtp-relay.brevo.com" if "brevo" in sender else "smtp.gmail.com", 587)
@@ -249,4 +242,4 @@ folium.LayerControl().add_to(m)
         elif max_tolm > 35:
             st.warning("Sisesta e-post teavituseks!")
 
-st.caption("🛰️ Copernicus Sentinel-2 | Google Earth Engine | Skyfield | Streamlit")
+st.caption("🛰️ Andmed: Copernicus Sentinel-2 | Google Earth Engine | Skyfield | Streamlit")
