@@ -93,10 +93,8 @@ if submitted:
 
         ndvi_col = collection.map(calc_ndvi)
 
-        # --- NDVI PILT KAARDIL (kaitstud) ---
+        # --- NDVI PILT KAARDIL (turvaline) ---
         mean_ndvi_image = ndvi_col.mean().select('NDVI').clip(buffer)
-
-        # Kontrolli, kas pildil on andmed
         try:
             sample = mean_ndvi_image.sample(buffer, 1).first().getInfo()
             if sample and 'NDVI' in sample['properties']:
@@ -113,14 +111,12 @@ if submitted:
                     control=True
                 ).add_to(m)
                 st.success("NDVI kiht lisatud!")
-            else:
-                st.info("NDVI kihti ei saa kuvada – andmed puuduvad.")
         except Exception as e:
             st.warning(f"NDVI kiht ebaõnnestus: {e}")
 
         folium.LayerControl().add_to(m)
 
-        # --- NDVI ANDMED (turvalisem) ---
+        # --- NDVI ANDMED (turvaline) ---
         def extract_stats(img):
             mean = img.reduceRegion(ee.Reducer.mean(), buffer, 10).get('NDVI')
             date = img.date().format('YYYY-MM-dd')
@@ -147,23 +143,34 @@ if submitted:
         avg_ndvi = np.mean(ndvi_vals)
         max_tolm = max(tolm)
 
-        # --- VARJUDE ANALÜÜS ---
+        # --- VARJUDE ANALÜÜS (TURVALINE) ---
         @st.cache_data
         def calculate_sunlight(lat, lon, date):
-            ts = load.timescale()
-            t0 = ts.utc(date.year, date.month, date.day)
-            t1 = ts.utc(date.year, date.month, date.day + 1)
-            eph = load('de421.bsp')
-            site = wgs84.latlon(lat, lon)
-            f = sunrise_sunset(eph, site)
-            times, events = find_discrete(t0, t1, f)
-            sunrise = next((t for t, e in zip(times, events) if e == 1), None)
-            sunset = next((t for t, e in zip(times, events) if e == 0), None)
-            if sunrise and sunset:
-                hours = (sunset.utc_datetime() - sunrise.utc_datetime()).total_seconds() / 3600
-                effective = hours * 0.75
-                return round(hours, 1), round(effective, 1)
-            return 0, 0
+            try:
+                ts = load.timescale()
+                t0 = ts.utc(date.year, date.month, date.day)
+                t1 = ts.utc(date.year, date.month, date.day + 1)
+                eph = load('de421.bsp')
+                site = wgs84.latlon(lat, lon)
+                f = sunrise_sunset(eph, site)
+                times, events = find_discrete(t0, t1, f)
+
+                sunrise_time = None
+                sunset_time = None
+                for t, event in zip(times, events):
+                    if event == 1:
+                        sunrise_time = t
+                    elif event == 0:
+                        sunset_time = t
+
+                if sunrise_time and sunset_time:
+                    hours = (sunset_time.utc_datetime() - sunrise_time.utc_datetime()).total_seconds() / 3600
+                    effective = hours * 0.75
+                    return round(hours, 1), round(effective, 1)
+                else:
+                    return 0, 0
+            except:
+                return 0, 0
 
         total_sun, effective_sun = calculate_sunlight(lat, lon, datetime.date.today())
 
@@ -183,7 +190,10 @@ if submitted:
         with col2:
             st.metric("NDVI keskmine", f"{avg_ndvi:.3f}")
         with col3:
-            st.metric("Efektiivne päike", f"{effective_sun}h", delta="-25% varju")
+            if effective_sun > 0:
+                st.metric("Efektiivne päike", f"{effective_sun}h", delta="-25% varju")
+            else:
+                st.metric("Efektiivne päike", "0h", delta="Polaarööl/päev")
 
         st.plotly_chart(fig, use_container_width=True)
         st.markdown("### 🗺️ Satelliitpilt + NDVI")
