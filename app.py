@@ -1,15 +1,15 @@
 import streamlit as st
-import ee, datetime, folium
+import ee, datetime, folium, json
 from streamlit_folium import folium_static
 from geopy.geocoders import Nominatim
 import plotly.express as px
 
-# --- GEE AUTENTIMINE (PARANDATUD) ---
+# --- GEE AUTENTIMINE (LÕPLIK) ---
 if 'gee' in st.secrets:
-    credentials_info = dict(st.secrets['gee'])
+    credentials_info = st.secrets['gee']
     credentials = ee.ServiceAccountCredentials(
         email=credentials_info['client_email'],
-        key_data=credentials_info  # OTSE dict!
+        key_data=json.dumps(credentials_info)  # JSON string!
     )
     ee.Initialize(credentials)
     st.success("✅ GEE ühendatud teenusekontoga!")
