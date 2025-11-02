@@ -16,9 +16,9 @@ import numpy as np
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Päikesepaneelide Tolmu- ja Varjuanalüüs", layout="wide")
 st.title("☀️ Päikesepaneelide Tolmu- ja Varjuanalüüs")
-st.markdown("Sisesta aadress → analüüs satelliitpiltidest + varjud + teavitus!")
+st.markdown("Sisesta aadress → satelliitpilt, tolm, varjud + teavitus!")
 
-# --- GEE AUTENTIMINE (secrets.toml) ---
+# --- GEE AUTENTIMINE ---
 if 'gee' in st.secrets:
     try:
         credentials_info = dict(st.secrets['gee'])
@@ -49,7 +49,7 @@ if submitted:
         st.warning("⚠️ Vali kuni 3 kuud korraga.")
         st.stop()
 
-    with st.spinner("Laen satelliidipilte ja analüüsin... 🛰️"):
+    with st.spinner("Laen satelliidipilte... 🛰️"):
         # --- GEOKOODEERIMINE ---
         geocoder = Nominatim(user_agent="solar_monitor_app")
         location = geocoder.geocode(address)
@@ -81,46 +81,65 @@ if submitted:
             .select(['B8', 'B4'])
         )
 
+        if collection.size().getInfo() == 0:
+            st.warning("Satelliidipilte ei leitud. Proovi laiemat perioodi.")
+            folium_static(m, width=900, height=500)
+            st.stop()
+
+        # --- NDVI ARVUTUS ---
         def calc_ndvi(img):
             ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI')
             return img.addBands(ndvi)
 
         ndvi_col = collection.map(calc_ndvi)
 
-        # --- KESKMINE NDVI PILT KAARDIL ---
+        # --- NDVI PILT KAARDIL (kaitstud) ---
         mean_ndvi_image = ndvi_col.mean().select('NDVI').clip(buffer)
-        ndvi_vis = {
-            'min': 0, 'max': 0.8,
-            'palette': ['#8B0000', '#FF4500', '#FFD700', '#ADFF2F', '#228B22']
-        }
-        map_id = mean_ndvi_image.getMapId(ndvi_vis)
-        folium.TileLayer(
-            tiles=map_id['tile_fetcher'].url_format,
-            attr='Google Earth Engine',
-            name='NDVI (punane = tolmune, roheline = puhas)',
-            overlay=True,
-            control=True
-        ).add_to(m)
+
+        # Kontrolli, kas pildil on andmed
+        try:
+            sample = mean_ndvi_image.sample(buffer, 1).first().getInfo()
+            if sample and 'NDVI' in sample['properties']:
+                ndvi_vis = {
+                    'min': 0, 'max': 0.8,
+                    'palette': ['#8B0000', '#FF4500', '#FFD700', '#ADFF2F', '#228B22']
+                }
+                map_id = mean_ndvi_image.getMapId(ndvi_vis)
+                folium.TileLayer(
+                    tiles=map_id['tile_fetcher'].url_format,
+                    attr='Google Earth Engine',
+                    name='NDVI (punane = tolmune)',
+                    overlay=True,
+                    control=True
+                ).add_to(m)
+                st.success("NDVI kiht lisatud!")
+            else:
+                st.info("NDVI kihti ei saa kuvada – andmed puuduvad.")
+        except Exception as e:
+            st.warning(f"NDVI kiht ebaõnnestus: {e}")
+
         folium.LayerControl().add_to(m)
 
-        # --- NDVI ANDMED ---
-        def add_mean(img):
+        # --- NDVI ANDMED (turvalisem) ---
+        def extract_stats(img):
             mean = img.reduceRegion(ee.Reducer.mean(), buffer, 10).get('NDVI')
-            return img.set('mean_ndvi', mean).set('date', img.date().format('YYYY-MM-dd'))
+            date = img.date().format('YYYY-MM-dd')
+            return ee.Feature(None, {'mean_ndvi': mean, 'date': date})
 
-        stats = ndvi_col.map(add_mean)
-        info = stats.getInfo()
+        stats_col = ndvi_col.map(extract_stats)
+        stats_list = stats_col.getInfo().get('features', [])
 
         dates = []
         ndvi_vals = []
-        for feature in info['features']:
-            props = feature['properties']
-            if 'mean_ndvi' in props and props['mean_ndvi'] is not None:
+        for feat in stats_list:
+            props = feat.get('properties', {})
+            if props.get('mean_ndvi') is not None:
                 dates.append(props['date'])
                 ndvi_vals.append(props['mean_ndvi'])
 
         if not dates:
-            st.warning("⚠️ Satelliidipilte ei leitud (pilved või andmed puuduvad).")
+            st.warning("NDVI andmeid ei leitud.")
+            folium_static(m, width=900, height=500)
             st.stop()
 
         # --- TOLMU INDEKS ---
@@ -142,22 +161,17 @@ if submitted:
             sunset = next((t for t, e in zip(times, events) if e == 0), None)
             if sunrise and sunset:
                 hours = (sunset.utc_datetime() - sunrise.utc_datetime()).total_seconds() / 3600
-                effective = hours * 0.75  # 25% varju (puud, hooned)
+                effective = hours * 0.75
                 return round(hours, 1), round(effective, 1)
             return 0, 0
 
         total_sun, effective_sun = calculate_sunlight(lat, lon, datetime.date.today())
 
         # --- GRAAFIK ---
-        df = {
-            "Kuupäev": dates,
-            "NDVI": ndvi_vals,
-            "Tolm %": tolm
-        }
+        df = {"Kuupäev": dates, "NDVI": ndvi_vals, "Tolm %": tolm}
         fig = px.line(
             df, x="Kuupäev", y=["NDVI", "Tolm %"],
-            title="NDVI ja Tolmu trend ajas",
-            labels={"value": "Väärtus", "variable": "Näitaja"},
+            title="NDVI ja Tolmu trend",
             color_discrete_sequence=['#228B22', '#FF4500']
         )
         fig.update_layout(legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01))
@@ -172,8 +186,7 @@ if submitted:
             st.metric("Efektiivne päike", f"{effective_sun}h", delta="-25% varju")
 
         st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("### 🗺️ Satelliitpilt + NDVI (200m ala)")
+        st.markdown("### 🗺️ Satelliitpilt + NDVI")
         folium_static(m, width=900, height=500)
 
         # --- TEAVITUS ---
@@ -182,26 +195,19 @@ if submitted:
                 try:
                     sender = st.secrets["email"]["sender"]
                     password = st.secrets["email"]["password"]
-
                     msg = MIMEMultipart()
                     msg["From"] = sender
                     msg["To"] = email_recipient
-                    msg["Subject"] = f"⚠️ Päikesepaneelid tolmused: {address}"
-
+                    msg["Subject"] = f"Päikesepaneelid tolmused: {address}"
                     body = f"""
                     AUTOMAATNE TEAVITUS
-
                     Aadress: {address}
-                    Maksimaalne tolm: {max_tolm:.1f}%
-                    NDVI keskmine: {avg_ndvi:.3f}
-                    Efektiivne päikeseaeg: {effective_sun} tundi
-
+                    Tolm: {max_tolm:.1f}%
+                    NDVI: {avg_ndvi:.3f}
+                    Päike: {effective_sun}h
                     Soovitus: Puhasta paneelid!
-
-                    Analüüs: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M')}
                     """
                     msg.attach(MIMEText(body, "plain"))
-
                     server = smtplib.SMTP("smtp-relay.brevo.com" if "brevo" in sender else "smtp.gmail.com", 587)
                     server.starttls()
                     server.login(sender, password)
@@ -211,6 +217,6 @@ if submitted:
                 except Exception as e:
                     st.error(f"E-posti viga: {e}")
         elif max_tolm > 35:
-            st.warning("Sisesta e-posti aadress, et saada teavitus!")
+            st.warning("Sisesta e-post teavituseks!")
 
-st.caption("🛰️ Andmed: Copernicus Sentinel-2 | Google Earth Engine | Skyfield | Streamlit")
+st.caption("🛰️ Copernicus Sentinel-2 | Google Earth Engine | Skyfield | Streamlit")
