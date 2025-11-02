@@ -116,6 +116,26 @@ if submitted:
 
         folium.LayerControl().add_to(m)
 
+    # Lisa sile NDVI kiht (interpolatsioon)
+folium.TileLayer(
+    tiles=map_id['tile_fetcher'].url_format,
+    attr='Google Earth Engine',
+    overlay=True,
+    name='NDVI (sile)',
+    opacity=0.7  # Natuke läbipaistev
+).add_to(m)
+
+# Lisa baaskaart (satelliit)
+folium.TileLayer(
+    tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attr='Esri',
+    name='Satelliitpilt',
+    overlay=True,
+    opacity=0.6
+).add_to(m)
+
+folium.LayerControl().add_to(m)
+
         # --- NDVI ANDMED (turvaline) ---
         def extract_stats(img):
             mean = img.reduceRegion(ee.Reducer.mean(), buffer, 10).get('NDVI')
